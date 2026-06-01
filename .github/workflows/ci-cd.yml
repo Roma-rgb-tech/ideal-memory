@@ -200,8 +200,8 @@ jobs:
       contents: read
       issues: write
       pull-requests: write
+      actions: write 
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -211,7 +211,7 @@ jobs:
         with:
           target: ${{ secrets.RAILWAY_URL }}
           rules_file_name: '.security/zap-rules.tsv'
-          cmd_options: '-a'
+          cmd_options: '-a -r report.html' 
           fail_action: false
 
       - name: Upload ZAP Report
@@ -219,4 +219,4 @@ jobs:
         if: always()
         with:
           name: zapreport
-          path: report_html.html
+          path: report.html 
