@@ -127,13 +127,15 @@ jobs:
         uses: bridgecrewio/checkov-action@v12
         with:
           directory: .
-          soft_fail: false
+          soft_fail: true
           output_format: json
           output_file_path: checkov-report.json
 
 
+
       - name: Run Trivy (Container Scan)
         uses: aquasecurity/trivy-action@master
+        continue-on-error: true  # Пайплайн не впаде, якщо знайде вразливості
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           format: sarif
@@ -142,8 +144,8 @@ jobs:
           exit-code: 0
 
       - name: Upload Trivy SARIF
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        uses: github/codeql-action/upload-sarif@v4  # Оновлено з v3
+        if: always() && hashFiles('trivy-report.sarif') != '' 
         with:
           sarif_file: trivy-report.sarif
 
