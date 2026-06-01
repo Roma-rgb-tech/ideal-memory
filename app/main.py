@@ -934,3 +934,6 @@ async def weather_by_coords(
 @app.get("/health")
 async def health():
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
+
+
