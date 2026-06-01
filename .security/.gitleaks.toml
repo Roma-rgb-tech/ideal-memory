@@ -1,0 +1,11 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allowlist for false positives"
+paths = [
+  '''.env.example''',
+  '''SECURITY.md''',
+  '''README.md'''
+]
+
