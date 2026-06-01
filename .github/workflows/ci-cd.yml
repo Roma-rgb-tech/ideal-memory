@@ -118,7 +118,7 @@ jobs:
           context: .
           file: ./docker/Dockerfile
           push: false
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: local-image:latest
           labels: ${{ steps.meta.outputs.labels }}
           load: true
 
@@ -137,7 +137,7 @@ jobs:
         uses: aquasecurity/trivy-action@master
         continue-on-error: true  # Пайплайн не впаде, якщо знайде вразливості
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          image-ref: 'local-image:latest'
           format: sarif
           output: trivy-report.sarif
           severity: CRITICAL,HIGH
