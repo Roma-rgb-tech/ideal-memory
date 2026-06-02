@@ -9,7 +9,7 @@
 
 ## 🔗 Live Demo
 
-**[→ Відкрити застосунок](https://your-app.railway.app)**
+**[→ Відкрити застосунок](https://ideal-memory-production.up.railway.app/)**
 
 ## 🏗️ Архітектура
 
