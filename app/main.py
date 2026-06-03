@@ -884,7 +884,6 @@ async def fetch_weather_data(lat: float, lon: float, city: str, country: str) ->
 
     # Estimate AQI from PM2.5-like proxy (random stub since Open-Meteo free tier)
     # In production you'd use Open-Meteo Air Quality API
-    # random stub since Open-Meteo free tier
     import random
     aqi = random.randint(20, 80)
     current["aqi"] = aqi
