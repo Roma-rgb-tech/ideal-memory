@@ -14,14 +14,15 @@ jobs:
   secrets-scan:
     name: 🔑 Secrets Scan (Gitleaks)
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          fetch-depth: 0  
+          fetch-depth: 0
 
       - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@v3
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -30,20 +31,26 @@ jobs:
     name: 🔍 SAST (Bandit + Semgrep)
     runs-on: ubuntu-latest
     needs: secrets-scan
+    timeout-minutes: 15
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
 
-      - name: Run Bandit (Python SAST)
+      - name: Run Bandit
         run: |
           pip install bandit
           bandit -r app/ -f json -o bandit-report.json || true
           bandit -r app/ -f txt || true
 
-
       - name: Run Semgrep
-        uses: returntocorp/semgrep-action@v1
+        uses: returntocorp/semgrep-action@fcd5ab7459e8d91b9755ea2d7ae8f07e232e185b
         with:
           config: auto
         env:
@@ -62,13 +69,13 @@ jobs:
     name: 📦 Dependency Scan (Snyk)
     runs-on: ubuntu-latest
     needs: secrets-scan
+    timeout-minutes: 15
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Run Snyk
-        uses: snyk/actions/python@master
-        continue-on-error: true
+        uses: snyk/actions/python@7bf1fdf9501a5f0d4f9a498f9d7c2db8a8d73d30
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
@@ -86,6 +93,7 @@ jobs:
     name: 🐳 Build + Trivy Scan
     runs-on: ubuntu-latest
     needs: [sast, dependency-scan]
+    timeout-minutes: 20
     permissions:
       contents: read
       packages: write
@@ -93,10 +101,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Log in to Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -104,7 +112,7 @@ jobs:
 
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -112,16 +120,21 @@ jobs:
             type=ref,event=branch
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build Docker image
-        uses: docker/build-push-action@v5
+        id: build
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./docker/Dockerfile
-          push: false
-          tags: local-image:latest
+          push: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' }}
+          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           load: true
-
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Run Checkov (IaC Scan)
         uses: bridgecrewio/checkov-action@v12
@@ -131,31 +144,21 @@ jobs:
           output_format: json
           output_file_path: checkov-report.json
 
-
-
       - name: Run Trivy (Container Scan)
-        uses: aquasecurity/trivy-action@master
-        continue-on-error: true 
+        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0
         with:
-          image-ref: 'local-image:latest'
+          image-ref: ${{ steps.build.outputs.imageid }}
           format: sarif
           output: trivy-report.sarif
           severity: CRITICAL,HIGH
-          exit-code: 0
+          exit-code: '1'
+          ignore-unfixed: true
 
       - name: Upload Trivy SARIF
         uses: github/codeql-action/upload-sarif@v4
-        if: always() && hashFiles('trivy-report.sarif') != '' 
+        if: always() && hashFiles('trivy-report.sarif') != ''
         with:
           sarif_file: trivy-report.sarif
-
-      - name: Push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./docker/Dockerfile
-          push: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' }}
-          tags: ${{ steps.meta.outputs.tags }}
 
       - name: Upload Reports
         uses: actions/upload-artifact@v4
@@ -171,6 +174,7 @@ jobs:
     name: 🚀 Deploy to Railway
     runs-on: ubuntu-latest
     needs: build
+    timeout-minutes: 10
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
     environment:
       name: production
@@ -178,40 +182,61 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-railway
 
       - name: Install Railway CLI
         run: npm install -g @railway/cli
 
       - name: Deploy to Railway
-        run: railway up --detach --project ${{ secrets.RAILWAY_PROJECT_ID }} --environment production --service ${{ secrets.RAILWAY_SERVICE_NAME }} 
-        
+        run: railway up --detach --project ${{ secrets.RAILWAY_PROJECT_ID }} --environment production --service ${{ secrets.RAILWAY_SERVICE_NAME }}
         env:
-          RAILWAY_SERVICE_NAME: ${{ secrets.RAILWAY_SERVICE_NAME }}
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+
+      - name: Wait for deployment health
+        run: |
+          for i in $(seq 1 12); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${{ vars.RAILWAY_URL }}/health)
+            if [ "$STATUS" = "200" ]; then
+              echo "Healthy after ${i}x5s"
+              exit 0
+            fi
+            echo "Attempt $i: status $STATUS"
+            sleep 5
+          done
+          echo "Health check failed after 60s"
+          exit 1
 
 
   dast:
     name: 🎯 DAST (OWASP ZAP)
     runs-on: ubuntu-latest
     needs: deploy
+    timeout-minutes: 15
     permissions:
       contents: read
       issues: write
       pull-requests: write
-      actions: write 
+      actions: write
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Verify target is reachable
+        run: curl -f --max-time 10 ${{ secrets.RAILWAY_URL }}/health || exit 1
 
       - name: Run OWASP ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.12.0
         with:
           target: ${{ secrets.RAILWAY_URL }}
           rules_file_name: '.security/zap-rules.tsv'
-          cmd_options: '-a -r report.html' 
+          cmd_options: '-a -r report.html'
           fail_action: false
 
       - name: Upload ZAP Report
@@ -219,4 +244,4 @@ jobs:
         if: always()
         with:
           name: zapreport
-          path: report.html 
+          path: report.html
