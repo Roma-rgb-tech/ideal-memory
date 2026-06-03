@@ -2,63 +2,55 @@ name: DevSecOps CI/CD Pipeline
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  IMAGE_TAG: ${{ github.sha }}
+  PYTHON_VERSION: "3.12"
 
 jobs:
   secrets-scan:
-    name: 🔑 Secrets Scan (Gitleaks)
+    name: 🔑 Secrets Scan
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7
+      - uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 
   sast:
-    name: 🔍 SAST (Bandit + Semgrep)
+    name: 🔍 SAST
     runs-on: ubuntu-latest
     needs: secrets-scan
-    timeout-minutes: 15
     steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@v4
 
-      - name: Cache pip
-        uses: actions/cache@v4
+      - uses: actions/setup-python@v5
         with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
-          restore-keys: ${{ runner.os }}-pip-
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
 
       - name: Run Bandit
         run: |
           pip install bandit
-          bandit -r app/ -f json -o bandit-report.json || true
-          bandit -r app/ -f txt || true
+          bandit -r app/ -f json -o bandit-report.json
+          bandit -r app/ -f txt
 
-      - name: Run Semgrep
-        uses: returntocorp/semgrep-action@fcd5ab7459e8d91b9755ea2d7ae8f07e232e185b
+      - uses: returntocorp/semgrep-action@v1
         with:
           config: auto
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
-        continue-on-error: true
 
-      - name: Upload Bandit Report
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: bandit-report
@@ -66,53 +58,70 @@ jobs:
 
 
   dependency-scan:
-    name: 📦 Dependency Scan (Snyk)
+    name: 📦 Dependency Scan
     runs-on: ubuntu-latest
     needs: secrets-scan
-    timeout-minutes: 15
     steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@v4
 
-      - name: Run Snyk
-        uses: snyk/actions/python@7bf1fdf9501a5f0d4f9a498f9d7c2db8a8d73d30
+      - uses: snyk/actions/python@0.4.0
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
           args: --severity-threshold=high --json-file-output=snyk-report.json
 
-      - name: Upload Snyk Report
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: snyk-report
           path: snyk-report.json
 
 
-  build:
-    name: 🐳 Build + Trivy Scan
+  test:
+    name: 🧪 Tests
     runs-on: ubuntu-latest
-    needs: [sast, dependency-scan]
-    timeout-minutes: 20
+    needs: secrets-scan
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest app/ --tb=short --junitxml=test-results.xml
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: test-results.xml
+
+
+  build:
+    name: 🐳 Build & Scan
+    runs-on: ubuntu-latest
+    needs: [sast, dependency-scan, test]
     permissions:
       contents: read
       packages: write
       security-events: write
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@v4
 
-      - name: Log in to Container Registry
-        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567
+      - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract Docker metadata
+      - uses: docker/metadata-action@v5
         id: meta
-        uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -120,48 +129,53 @@ jobs:
             type=ref,event=branch
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v3
 
       - name: Build Docker image
-        id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v5
         with:
           context: .
           file: ./docker/Dockerfile
-          push: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          push: false
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           labels: ${{ steps.meta.outputs.labels }}
           load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Run Checkov (IaC Scan)
-        uses: bridgecrewio/checkov-action@v12
+      - uses: bridgecrewio/checkov-action@v12
         with:
           directory: .
           soft_fail: true
           output_format: json
           output_file_path: checkov-report.json
 
-      - name: Run Trivy (Container Scan)
-        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@0.28.0
         with:
-          image-ref: ${{ steps.build.outputs.imageid }}
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           format: sarif
           output: trivy-report.sarif
           severity: CRITICAL,HIGH
-          exit-code: '1'
-          ignore-unfixed: true
+          exit-code: 1
 
-      - name: Upload Trivy SARIF
-        uses: github/codeql-action/upload-sarif@v4
+      - uses: github/codeql-action/upload-sarif@v3
         if: always() && hashFiles('trivy-report.sarif') != ''
         with:
           sarif_file: trivy-report.sarif
 
-      - name: Upload Reports
-        uses: actions/upload-artifact@v4
+      - name: Push Docker image
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+
+      - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: security-reports
@@ -171,77 +185,76 @@ jobs:
 
 
   deploy:
-    name: 🚀 Deploy to Railway
+    name: 🚀 Deploy
     runs-on: ubuntu-latest
     needs: build
-    timeout-minutes: 10
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
     environment:
       name: production
       url: ${{ vars.RAILWAY_URL }}
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-
-      - name: Cache npm
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-railway
+      - uses: actions/checkout@v4
 
       - name: Install Railway CLI
         run: npm install -g @railway/cli
 
       - name: Deploy to Railway
-        run: railway up --detach --project ${{ secrets.RAILWAY_PROJECT_ID }} --environment production --service ${{ secrets.RAILWAY_SERVICE_NAME }}
+        run: |
+          railway up \
+            --detach \
+            --project ${{ secrets.RAILWAY_PROJECT_ID }} \
+            --environment production \
+            --service ${{ secrets.RAILWAY_SERVICE_NAME }}
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
-      - name: Wait for deployment health
+      - name: Health check
         run: |
-          for i in $(seq 1 12); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${{ vars.RAILWAY_URL }}/health)
-            if [ "$STATUS" = "200" ]; then
-              echo "Healthy after ${i}x5s"
-              exit 0
-            fi
-            echo "Attempt $i: status $STATUS"
-            sleep 5
-          done
-          echo "Health check failed after 60s"
-          exit 1
+          sleep 15
+          curl --fail --retry 5 --retry-delay 5 ${{ vars.RAILWAY_URL }}/health
 
 
   dast:
-    name: 🎯 DAST (OWASP ZAP)
+    name: 🎯 DAST
     runs-on: ubuntu-latest
     needs: deploy
-    timeout-minutes: 15
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
     permissions:
       contents: read
       issues: write
       pull-requests: write
-      actions: write
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@v4
 
-      - name: Verify target is reachable
-        run: curl -f --max-time 10 ${{ secrets.RAILWAY_URL }}/health || exit 1
-
-      - name: Run OWASP ZAP Baseline Scan
-        uses: zaproxy/action-baseline@v0.14.0
+      - uses: zaproxy/action-baseline@v0.12.0
         with:
-          target: ${{ secrets.RAILWAY_URL }}
-          rules_file_name: '.security/zap-rules.tsv'
-          cmd_options: '-a -r report.html'
+          target: ${{ vars.RAILWAY_URL }}
+          rules_file_name: .security/zap-rules.tsv
+          cmd_options: -a -r report.html
           fail_action: false
 
-      - name: Upload ZAP Report
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: zapreport
+          name: zap-report
           path: report.html
+
+
+  notify:
+    name: 📣 Notify
+    runs-on: ubuntu-latest
+    needs: [build, deploy, dast]
+    if: always() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    steps:
+      - name: Send Telegram notification
+        run: |
+          STATUS="✅ Success"
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            STATUS="❌ Failed"
+          fi
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d parse_mode="Markdown" \
+            -d text="${STATUS}: \`${{ github.repository }}\` — \`${{ github.ref_name }}\` by ${{ github.actor }}"
